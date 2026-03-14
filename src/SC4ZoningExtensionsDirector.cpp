@@ -16,6 +16,8 @@
 #include "zoning/ZoneStatusPanel.hpp"
 #include "zoning/ZoneViewInputControl.hpp"
 
+#include <filesystem>
+
 namespace
 {
     constexpr uint32_t kGZWin_WinSC4App = 0x6104489A;
@@ -68,6 +70,29 @@ bool SC4ZoningExtensionsDirector::PostAppInit()
     LOG_INFO("Detected game version {}", VersionDetection::GetInstance().GetGameVersion());
 
     settings_.Load();
+    std::wstring iniPath = settings_.GetIniPath();
+    std::string logDirectory;
+    if (!iniPath.empty()) {
+        const std::filesystem::path iniDirectory = std::filesystem::path(iniPath).parent_path();
+        const std::filesystem::path logDirectoryPath =
+            iniDirectory.has_parent_path() ? iniDirectory.parent_path() : iniDirectory;
+        logDirectory = logDirectoryPath.string();
+    }
+
+    Logger::Shutdown();
+    Logger::Initialize("SC4ZoningExtensions", logDirectory, settings_.GetLogToFile());
+    Logger::SetLevel(settings_.GetLogLevel());
+
+    LOG_INFO("SC4ZoningExtensions initializing");
+    LOG_INFO("Detected game version {}", VersionDetection::GetInstance().GetGameVersion());
+    if (!iniPath.empty()) {
+        LOG_INFO("Using settings file: {}", std::filesystem::path(iniPath).string());
+    }
+    LOG_INFO(
+        "Applied logging settings: level={}, file={}",
+        spdlog::level::to_string_view(settings_.GetLogLevel()),
+        settings_.GetLogToFile());
+
     toolState_.SetZoneDefaults(settings_.GetZoneDefaults());
 
     cIGZMessageServer2Ptr messageServer;

@@ -7,13 +7,61 @@
 #endif
 #include <Windows.h>
 
+#include <algorithm>
 #include <array>
+#include <cwctype>
 #include <cwchar>
+#include <string>
 #include <string_view>
 
 namespace
 {
     constexpr wchar_t kIniFileName[] = L"SC4ZoningExtensions.ini";
+    constexpr wchar_t kGeneralSectionName[] = L"SC4ZoningExtensions";
+
+    std::wstring ToLower(const std::wstring_view value)
+    {
+        std::wstring normalized(value);
+        std::transform(
+            normalized.begin(),
+            normalized.end(),
+            normalized.begin(),
+            [](const wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+        return normalized;
+    }
+
+    spdlog::level::level_enum ParseLogLevel(const std::wstring_view value, bool& valid) noexcept
+    {
+        const std::wstring normalized = ToLower(value);
+
+        if (normalized == L"trace") { valid = true; return spdlog::level::trace; }
+        if (normalized == L"debug") { valid = true; return spdlog::level::debug; }
+        if (normalized == L"info") { valid = true; return spdlog::level::info; }
+        if (normalized == L"warn" || normalized == L"warning") { valid = true; return spdlog::level::warn; }
+        if (normalized == L"error") { valid = true; return spdlog::level::err; }
+        if (normalized == L"critical") { valid = true; return spdlog::level::critical; }
+        if (normalized == L"off") { valid = true; return spdlog::level::off; }
+
+        valid = false;
+        return spdlog::level::info;
+    }
+
+    bool ParseBool(const std::wstring_view value, bool& valid) noexcept
+    {
+        const std::wstring normalized = ToLower(value);
+
+        if (normalized == L"true" || normalized == L"1" || normalized == L"yes") {
+            valid = true;
+            return true;
+        }
+        if (normalized == L"false" || normalized == L"0" || normalized == L"no") {
+            valid = true;
+            return false;
+        }
+
+        valid = false;
+        return false;
+    }
 
     const wchar_t* GetZoneTypeIniSectionName(const cISC4ZoneManager::ZoneType zoneType) noexcept
     {
@@ -110,6 +158,7 @@ bool Settings::Load()
         WriteDefaultIniFile_();
     }
 
+    LoadGeneralSettings_();
     LoadZoneDefaults_();
     LOG_INFO("Loaded settings");
     return true;
@@ -123,6 +172,16 @@ const ZoneTypeDefaultsTable& Settings::GetZoneDefaults() const noexcept
 const std::wstring& Settings::GetIniPath() const noexcept
 {
     return iniPath_;
+}
+
+spdlog::level::level_enum Settings::GetLogLevel() const noexcept
+{
+    return logLevel_;
+}
+
+bool Settings::GetLogToFile() const noexcept
+{
+    return logToFile_;
 }
 
 bool Settings::ResolveIniPath_()
@@ -154,6 +213,9 @@ bool Settings::ResolveIniPath_()
 
 void Settings::SetBuiltInDefaults_() noexcept
 {
+    logLevel_ = spdlog::level::info;
+    logToFile_ = true;
+
     for (size_t i = 0; i < zoneDefaults_.size(); ++i) {
         zoneDefaults_[i].parcelWidth = 3;
         zoneDefaults_[i].parcelLength = 3;
@@ -163,6 +225,38 @@ void Settings::SetBuiltInDefaults_() noexcept
 
     zoneDefaults_[static_cast<size_t>(cISC4ZoneManager::ZoneType::None)].networkMode = ZoneInternalNetworkMode::None;
     zoneDefaults_[static_cast<size_t>(cISC4ZoneManager::ZoneType::Plopped)].networkMode = ZoneInternalNetworkMode::None;
+}
+
+void Settings::LoadGeneralSettings_() noexcept
+{
+    std::array<wchar_t, 64> buffer{};
+
+    GetPrivateProfileStringW(
+        kGeneralSectionName,
+        L"LogLevel",
+        L"info",
+        buffer.data(),
+        static_cast<DWORD>(buffer.size()),
+        iniPath_.c_str());
+    bool valid = false;
+    logLevel_ = ParseLogLevel(buffer.data(), valid);
+    if (!valid) {
+        logLevel_ = spdlog::level::info;
+        LOG_ERROR("Invalid LogLevel value in [{}]. Using default info.", "SC4ZoningExtensions");
+    }
+
+    GetPrivateProfileStringW(
+        kGeneralSectionName,
+        L"LogToFile",
+        L"true",
+        buffer.data(),
+        static_cast<DWORD>(buffer.size()),
+        iniPath_.c_str());
+    logToFile_ = ParseBool(buffer.data(), valid);
+    if (!valid) {
+        logToFile_ = true;
+        LOG_ERROR("Invalid LogToFile value in [{}]. Using default true.", "SC4ZoningExtensions");
+    }
 }
 
 void Settings::LoadZoneDefaults_() noexcept
@@ -195,6 +289,9 @@ void Settings::LoadZoneDefaults_() noexcept
 
 void Settings::WriteDefaultIniFile_() const
 {
+    WritePrivateProfileStringW(kGeneralSectionName, L"LogLevel", L"info", iniPath_.c_str());
+    WritePrivateProfileStringW(kGeneralSectionName, L"LogToFile", L"true", iniPath_.c_str());
+
     for (size_t i = 0; i < zoneDefaults_.size(); ++i) {
         const auto zoneType = static_cast<cISC4ZoneManager::ZoneType>(i);
         const wchar_t* section = GetZoneTypeIniSectionName(zoneType);
