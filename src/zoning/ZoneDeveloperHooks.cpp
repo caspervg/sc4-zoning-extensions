@@ -240,6 +240,10 @@ namespace {
         return std::clamp(value, 1, 32);
     }
 
+    int ClampStreetInterval(const int value) {
+        return std::clamp(value, 0, 32);
+    }
+
     void AdjustDetermineLotSizeResult(void* zoneDeveloper) {
         if (!zoneDeveloper || !gContext.toolState) {
             return;
@@ -260,7 +264,13 @@ namespace {
         lotHeight = ClampParcelMetric(snapshot.parcelLength);
         minWidth = lotWidth;
         minHeight = lotHeight;
-        streetInterval = std::max(streetInterval, std::max(lotWidth, lotHeight) + 2);
+        const int32_t requestedStreetInterval = ClampStreetInterval(snapshot.streetInterval);
+        if (requestedStreetInterval == 0) {
+            streetInterval = std::max(streetInterval, std::max(lotWidth, lotHeight) + 2);
+        }
+        else {
+            streetInterval = requestedStreetInterval;
+        }
     }
 
     void __fastcall DetermineLotSizeHook(void* self, void*, void* region) {

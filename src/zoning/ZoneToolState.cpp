@@ -66,9 +66,19 @@ void ZoneToolState::AdjustParcelLength(const int delta) noexcept
     snapshot_.parcelLength = ClampParcelMetric_(snapshot_.parcelLength + delta);
 }
 
+void ZoneToolState::AdjustStreetInterval(const int delta) noexcept
+{
+    snapshot_.streetInterval = ClampStreetInterval_(snapshot_.streetInterval + delta);
+}
+
 int ZoneToolState::ClampParcelMetric_(const int value) noexcept
 {
     return std::clamp(value, 1, 16);
+}
+
+int ZoneToolState::ClampStreetInterval_(const int value) noexcept
+{
+    return std::clamp(value, 0, 32);
 }
 
 void ZoneToolState::ApplyDefaultsForCurrentZoneType_() noexcept
@@ -81,6 +91,7 @@ void ZoneToolState::ApplyDefaultsForCurrentZoneType_() noexcept
     const ZoneTypeDefaults& defaults = zoneDefaults_[index];
     snapshot_.parcelWidth = ClampParcelMetric_(defaults.parcelWidth);
     snapshot_.parcelLength = ClampParcelMetric_(defaults.parcelLength);
+    snapshot_.streetInterval = ClampStreetInterval_(defaults.streetInterval);
     snapshot_.networkMode = defaults.networkMode;
 }
 
@@ -154,14 +165,22 @@ const char* GetZoneNetworkModeShortLabel(const ZoneInternalNetworkMode mode) noe
 
 ZoneToolTipText BuildZoneToolTipText(const ZoneToolSnapshot& snapshot)
 {
+    const char* streetIntervalLabel = snapshot.streetInterval == 0 ? "Auto" : nullptr;
+    char streetIntervalBuffer[16] = {};
+    if (!streetIntervalLabel) {
+        std::snprintf(streetIntervalBuffer, sizeof(streetIntervalBuffer), "%d", snapshot.streetInterval);
+        streetIntervalLabel = streetIntervalBuffer;
+    }
+
     char bodyBuffer[192] = {};
     std::snprintf(
         bodyBuffer,
         sizeof(bodyBuffer),
-        "%s | %dx%d\nTab/Shift+Tab network | -/+ width | [/] height",
+        "%s | %dx%d | I:%s\nTab/Shift+Tab network | -/+ width | [/] height | ,/. interval",
         GetZoneNetworkModeShortLabel(snapshot.networkMode),
         snapshot.parcelWidth,
-        snapshot.parcelLength);
+        snapshot.parcelLength,
+        streetIntervalLabel);
 
     ZoneToolTipText text;
     text.title = GetZoneTypeShortLabel(snapshot.zoneType);
@@ -173,14 +192,22 @@ ZoneToolStatusText BuildZoneToolStatusText(const ZoneToolSnapshot& snapshot)
 {
     char zoneBuffer[96] = {};
     char parcelBuffer[64] = {};
+    char intervalBuffer[48] = {};
 
     std::snprintf(zoneBuffer, sizeof(zoneBuffer), "Zone: %s", GetZoneTypeLabel(snapshot.zoneType));
     std::snprintf(parcelBuffer, sizeof(parcelBuffer), "Parcel: %d x %d", snapshot.parcelWidth, snapshot.parcelLength);
+    if (snapshot.streetInterval == 0) {
+        std::snprintf(intervalBuffer, sizeof(intervalBuffer), "Street interval: Auto");
+    }
+    else {
+        std::snprintf(intervalBuffer, sizeof(intervalBuffer), "Street interval: %d", snapshot.streetInterval);
+    }
 
     ZoneToolStatusText text;
     text.zoneLine = zoneBuffer;
     text.parcelLine = parcelBuffer;
-    text.modifiersLine = "Tab/Shift+Tab network | -/+ width | [/] height";
+    text.streetIntervalLine = intervalBuffer;
+    text.modifiersLine = "Tab/Shift+Tab network | -/+ width | [/] height | ,/. interval";
     text.wheelLine.clear();
     return text;
 }

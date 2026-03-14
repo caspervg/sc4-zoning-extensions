@@ -462,6 +462,14 @@ bool ZoneViewInputControl::OnKeyDown(const int32_t vkCode, const uint32_t modifi
         toolState_.AdjustParcelLength(1);
         handledAdjustment = true;
         break;
+    case VK_OEM_COMMA:
+        toolState_.AdjustStreetInterval(-1);
+        handledAdjustment = true;
+        break;
+    case VK_OEM_PERIOD:
+        toolState_.AdjustStreetInterval(1);
+        handledAdjustment = true;
+        break;
     default:
         break;
     }

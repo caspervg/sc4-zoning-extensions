@@ -157,6 +157,7 @@ void Settings::SetBuiltInDefaults_() noexcept
     for (size_t i = 0; i < zoneDefaults_.size(); ++i) {
         zoneDefaults_[i].parcelWidth = 3;
         zoneDefaults_[i].parcelLength = 3;
+        zoneDefaults_[i].streetInterval = 0;
         zoneDefaults_[i].networkMode = ZoneInternalNetworkMode::Street;
     }
 
@@ -175,6 +176,11 @@ void Settings::LoadZoneDefaults_() noexcept
 
         defaults.parcelWidth = GetPrivateProfileIntW(section, L"ParcelWidth", defaults.parcelWidth, iniPath_.c_str());
         defaults.parcelLength = GetPrivateProfileIntW(section, L"ParcelHeight", defaults.parcelLength, iniPath_.c_str());
+        defaults.streetInterval = GetPrivateProfileIntW(
+            section,
+            L"StreetInterval",
+            defaults.streetInterval,
+            iniPath_.c_str());
 
         GetPrivateProfileStringW(
             section,
@@ -196,11 +202,14 @@ void Settings::WriteDefaultIniFile_() const
 
         wchar_t widthBuffer[16] = {};
         wchar_t heightBuffer[16] = {};
+        wchar_t streetIntervalBuffer[16] = {};
         _snwprintf_s(widthBuffer, _countof(widthBuffer), _TRUNCATE, L"%d", defaults.parcelWidth);
         _snwprintf_s(heightBuffer, _countof(heightBuffer), _TRUNCATE, L"%d", defaults.parcelLength);
+        _snwprintf_s(streetIntervalBuffer, _countof(streetIntervalBuffer), _TRUNCATE, L"%d", defaults.streetInterval);
 
         WritePrivateProfileStringW(section, L"ParcelWidth", widthBuffer, iniPath_.c_str());
         WritePrivateProfileStringW(section, L"ParcelHeight", heightBuffer, iniPath_.c_str());
+        WritePrivateProfileStringW(section, L"StreetInterval", streetIntervalBuffer, iniPath_.c_str());
         WritePrivateProfileStringW(section, L"Network", GetNetworkModeIniName(defaults.networkMode), iniPath_.c_str());
     }
 }

@@ -21,6 +21,7 @@ struct ZoneToolSnapshot
     ZoneInternalNetworkMode networkMode = ZoneInternalNetworkMode::Street;
     int parcelWidth = 3;
     int parcelLength = 3;
+    int streetInterval = 0;
     bool toolActive = false;
     std::string validationMessage;
 };
@@ -29,6 +30,7 @@ struct ZoneTypeDefaults
 {
     int parcelWidth = 3;
     int parcelLength = 3;
+    int streetInterval = 0;
     ZoneInternalNetworkMode networkMode = ZoneInternalNetworkMode::Street;
 };
 
@@ -44,6 +46,7 @@ struct ZoneToolStatusText
 {
     std::string zoneLine;
     std::string parcelLine;
+    std::string streetIntervalLine;
     std::string modifiersLine;
     std::string wheelLine;
 };
@@ -60,9 +63,11 @@ public:
     void CycleNetworkMode(int delta) noexcept;
     void AdjustParcelWidth(int delta) noexcept;
     void AdjustParcelLength(int delta) noexcept;
+    void AdjustStreetInterval(int delta) noexcept;
 
 private:
     static int ClampParcelMetric_(int value) noexcept;
+    static int ClampStreetInterval_(int value) noexcept;
     void ApplyDefaultsForCurrentZoneType_() noexcept;
 
     ZoneToolSnapshot snapshot_{};

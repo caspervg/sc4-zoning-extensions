@@ -32,6 +32,7 @@ void ZoneStatusPanel::OnRender()
     const ZoneToolStatusText text = BuildZoneToolStatusText(snapshot);
     ImGui::TextUnformatted(text.zoneLine.c_str());
     ImGui::TextUnformatted(text.parcelLine.c_str());
+    ImGui::TextUnformatted(text.streetIntervalLine.c_str());
     if (!snapshot.validationMessage.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.30f, 0.30f, 1.0f));
         ImGui::TextWrapped("%s", snapshot.validationMessage.c_str());
