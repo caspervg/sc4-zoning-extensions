@@ -26,6 +26,7 @@ struct ZoneToolSnapshot
     bool diagonalMode = false;
     int diagonalThickness = 1;
     bool toolActive = false;
+    bool previewActive = false;
     std::string validationMessage;
 };
 
@@ -62,6 +63,7 @@ public:
     void SetZoneDefaults(const ZoneTypeDefaultsTable& defaults) noexcept;
     void SetZoneType(cISC4ZoneManager::ZoneType zoneType) noexcept;
     void SetToolActive(bool value) noexcept;
+    void SetPreviewActive(bool value) noexcept;
     void SetValidationMessage(std::string value) noexcept;
     void SetDiagonalState(bool supported, bool enabled, int thickness) noexcept;
     void CycleNetworkMode(int delta) noexcept;

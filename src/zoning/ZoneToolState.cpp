@@ -37,6 +37,11 @@ void ZoneToolState::SetToolActive(const bool value) noexcept
     snapshot_.toolActive = value;
 }
 
+void ZoneToolState::SetPreviewActive(const bool value) noexcept
+{
+    snapshot_.previewActive = value;
+}
+
 void ZoneToolState::SetValidationMessage(std::string value) noexcept
 {
     if (snapshot_.validationMessage != value) {

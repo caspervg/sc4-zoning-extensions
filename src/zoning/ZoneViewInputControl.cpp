@@ -1020,8 +1020,10 @@ void ZoneViewInputControl::ClearCursorText_() {
 }
 
 bool ZoneViewInputControl::UpdatePreview_() {
+    toolState_.SetPreviewActive(true);
     const ZoneToolSnapshot snapshot = toolState_.Snapshot();
     if (snapshot.zoneType == cISC4ZoneManager::ZoneType::Plopped) {
+        toolState_.SetPreviewActive(false);
         return false;
     }
 
@@ -1029,6 +1031,7 @@ bool ZoneViewInputControl::UpdatePreview_() {
     cISC4ZoneManager* zoneManager = nullptr;
     cISC4ZoneDeveloper* zoneDeveloper = nullptr;
     if (!TryGetServices_(city, zoneManager, zoneDeveloper)) {
+        toolState_.SetPreviewActive(false);
         return false;
     }
 
@@ -1062,6 +1065,7 @@ bool ZoneViewInputControl::UpdatePreview_() {
             ZoneDeveloperHooks::ClearLiveHighlight(zoneDeveloper);
             ShowInvalidSelectionOverlay_(city, zoneRegion);
             UpdateCursorText_();
+            toolState_.SetPreviewActive(false);
             return true;
         }
     }
@@ -1075,6 +1079,7 @@ bool ZoneViewInputControl::UpdatePreview_() {
         ZoneDeveloperHooks::ClearLiveHighlight(zoneDeveloper);
         ShowInvalidSelectionOverlay_(city, zoneRegion);
         UpdateCursorText_();
+        toolState_.SetPreviewActive(false);
         return true;
     }
 
@@ -1096,10 +1101,12 @@ bool ZoneViewInputControl::UpdatePreview_() {
         }
     }
     UpdateCursorText_();
+    toolState_.SetPreviewActive(false);
     return true;
 }
 
 bool ZoneViewInputControl::CommitSelection_() {
+    toolState_.SetPreviewActive(false);
     const ZoneToolSnapshot snapshot = toolState_.Snapshot();
     if (snapshot.zoneType == cISC4ZoneManager::ZoneType::Plopped) {
         if (view3D) {
@@ -1211,6 +1218,7 @@ bool ZoneViewInputControl::CommitSelection_() {
 }
 
 void ZoneViewInputControl::ClearPreview_() {
+    toolState_.SetPreviewActive(false);
     cISC4City* city = nullptr;
     cISC4ZoneManager* zoneManager = nullptr;
     cISC4ZoneDeveloper* zoneDeveloper = nullptr;
@@ -1225,6 +1233,7 @@ void ZoneViewInputControl::ClearPreview_() {
 }
 
 void ZoneViewInputControl::CancelDrag_() {
+    toolState_.SetPreviewActive(false);
     ReleaseOverrideNetworkTool_();
     dragging_ = false;
     ReleaseCapture();
