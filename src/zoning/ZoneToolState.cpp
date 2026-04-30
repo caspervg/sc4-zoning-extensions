@@ -44,6 +44,13 @@ void ZoneToolState::SetValidationMessage(std::string value) noexcept
     }
 }
 
+void ZoneToolState::SetDiagonalState(const bool supported, const bool enabled, const int thickness) noexcept
+{
+    snapshot_.diagonalSupported = supported;
+    snapshot_.diagonalMode = supported && enabled;
+    snapshot_.diagonalThickness = std::max(1, thickness);
+}
+
 void ZoneToolState::CycleNetworkMode(const int delta) noexcept
 {
     const auto it = std::find(kNetworkModes.begin(), kNetworkModes.end(), snapshot_.networkMode);
@@ -172,7 +179,7 @@ ZoneToolTipText BuildZoneToolTipText(const ZoneToolSnapshot& snapshot)
         streetIntervalLabel = streetIntervalBuffer;
     }
 
-    char bodyBuffer[192] = {};
+    char bodyBuffer[256] = {};
     std::snprintf(
         bodyBuffer,
         sizeof(bodyBuffer),
@@ -208,6 +215,20 @@ ZoneToolStatusText BuildZoneToolStatusText(const ZoneToolSnapshot& snapshot)
     text.parcelLine = parcelBuffer;
     text.streetIntervalLine = intervalBuffer;
     text.modifiersLine = "Tab/Shift+Tab network | -/+ width | [/] height | ,/. interval";
-    text.wheelLine.clear();
+    if (!snapshot.diagonalSupported) {
+        text.wheelLine.clear();
+    }
+    else if (snapshot.diagonalMode) {
+        char diagonalBuffer[64] = {};
+        std::snprintf(
+            diagonalBuffer,
+            sizeof(diagonalBuffer),
+            "Diagonal: On (D toggles) | Width: %d | Wheel adjusts",
+            snapshot.diagonalThickness);
+        text.wheelLine = diagonalBuffer;
+    }
+    else {
+        text.wheelLine = "Diagonal: Off (D toggles)";
+    }
     return text;
 }

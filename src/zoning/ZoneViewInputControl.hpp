@@ -50,6 +50,8 @@ private:
 
     bool TryGetServices_(cISC4City*& city, cISC4ZoneManager*& zoneManager, cISC4ZoneDeveloper*& zoneDeveloper) const;
     bool PickCell_(int32_t screenX, int32_t screenZ, int32_t& cellX, int32_t& cellZ) const;
+    bool IsDiagonalModeActive_(const ZoneToolSnapshot& snapshot) const;
+    void SyncDiagonalState_() noexcept;
 
     SC4CellRegion<long> BuildDeveloperRegion_() const;
     SC4CellRegion<int32_t> BuildZoneManagerRegion_() const;
@@ -88,6 +90,7 @@ private:
     std::string previewValidationMessage_;
     cISC4NetworkTool* overrideNetworkTool_ = nullptr;
     ZoneInternalNetworkMode overrideNetworkToolMode_ = ZoneInternalNetworkMode::Street;
+    bool diagonalMode_ = false;
+    int diagonalThickness_ = 1;
     bool invalidSelectionOverlayActive_ = false;
-    mutable uint64_t lastCostValidationLogKey_ = 0;
 };

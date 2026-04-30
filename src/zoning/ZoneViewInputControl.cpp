@@ -30,12 +30,15 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 
 namespace {
     constexpr uint32_t kCursorTextId = 0x57C44A11;
     constexpr uint32_t kCursorTextPriority = 160;
     constexpr size_t kZoneSoundTableSize = 16;
     constexpr uint16_t kSupportedGameVersion = 641;
+    constexpr int kMinDiagonalThickness = 1;
+    constexpr int kMaxDiagonalThickness = 24;
     constexpr size_t kZoneConstraintTableSize = 16;
     constexpr size_t kZoneMaxSlopeOffset = 0x198;
     constexpr size_t kZoneCostOffset = 0x1E0;
@@ -218,6 +221,41 @@ namespace {
         return buffer;
     }
 
+    std::string FormatDiagonalStatusMessage(const int thickness) {
+        char buffer[64] = {};
+        std::snprintf(buffer, sizeof(buffer), "Diagonal mode active (width %d)", thickness);
+        return buffer;
+    }
+
+    template <typename T>
+    SC4CellRegion<T> CreateDiagonalRegionMask(const SC4CellRegion<T>& source,
+                                              T startX,
+                                              T startZ,
+                                              T endX,
+                                              T endZ,
+                                              int thickness);
+
+    template <typename T>
+    void ApplyDiagonalMaskIfNeeded(SC4CellRegion<T>& region,
+                                   const bool diagonalModeActive,
+                                   const int32_t startCellX,
+                                   const int32_t startCellZ,
+                                   const int32_t currentCellX,
+                                   const int32_t currentCellZ,
+                                   const int diagonalThickness) {
+        if (!diagonalModeActive) {
+            return;
+        }
+
+        region = CreateDiagonalRegionMask(
+            region,
+            static_cast<T>(startCellX),
+            static_cast<T>(startCellZ),
+            static_cast<T>(currentCellX),
+            static_cast<T>(currentCellZ),
+            diagonalThickness);
+    }
+
     bool PlaySoundId(const uint32_t soundId) {
         if (soundId == 0) {
             return false;
@@ -236,6 +274,83 @@ namespace {
 
     bool PlayZoneSound(const uint32_t (&table)[kZoneSoundTableSize], const cISC4ZoneManager::ZoneType zoneType) {
         return PlaySoundId(GetZoneSoundId(table, zoneType));
+    }
+
+    bool SupportsDiagonalMode(const ZoneToolSnapshot& snapshot) {
+        switch (snapshot.zoneType) {
+        case cISC4ZoneManager::ZoneType::None:
+        case cISC4ZoneManager::ZoneType::Landfill:
+        case cISC4ZoneManager::ZoneType::Plopped:
+            return false;
+        default:
+            return true;
+        }
+    }
+
+    template <typename T>
+    SC4CellRegion<T> CreateDiagonalRegionMask(const SC4CellRegion<T>& source,
+                                              const T startX,
+                                              const T startZ,
+                                              const T endX,
+                                              const T endZ,
+                                              const int thickness) {
+        SC4CellRegion<T> diagonal(
+            source.bounds.topLeftX,
+            source.bounds.topLeftY,
+            source.bounds.bottomRightX,
+            source.bounds.bottomRightY,
+            false);
+
+        const int clampedThickness = std::clamp(thickness, kMinDiagonalThickness, kMaxDiagonalThickness);
+        const int startOffset = -(clampedThickness / 2);
+        const int endOffset = startOffset + clampedThickness - 1;
+        const int dx = std::abs(static_cast<int>(endX - startX));
+        const int dz = std::abs(static_cast<int>(endZ - startZ));
+        const T stepX = startX <= endX ? 1 : -1;
+        const T stepZ = startZ <= endZ ? 1 : -1;
+        int err = dx - dz;
+
+        T x = startX;
+        T z = startZ;
+
+        while (true) {
+            for (int offset = startOffset; offset <= endOffset; ++offset) {
+                T thickX = x;
+                T thickZ = z;
+                if (dx >= dz) {
+                    thickZ = static_cast<T>(z + offset);
+                }
+                else {
+                    thickX = static_cast<T>(x + offset);
+                }
+
+                if (thickX >= diagonal.bounds.topLeftX &&
+                    thickX <= diagonal.bounds.bottomRightX &&
+                    thickZ >= diagonal.bounds.topLeftY &&
+                    thickZ <= diagonal.bounds.bottomRightY) {
+                    diagonal.cellMap.SetValue(
+                        static_cast<uint32_t>(thickX - diagonal.bounds.topLeftX),
+                        static_cast<uint32_t>(thickZ - diagonal.bounds.topLeftY),
+                        true);
+                }
+            }
+
+            if (x == endX && z == endZ) {
+                break;
+            }
+
+            const int doubledError = err * 2;
+            if (doubledError > -dz) {
+                err -= dz;
+                x += stepX;
+            }
+            if (doubledError < dx) {
+                err += dx;
+                z += stepZ;
+            }
+        }
+
+        return diagonal;
     }
 
     class ScopedZoneDeveloperNetworkToolOverride {
@@ -289,9 +404,12 @@ bool ZoneViewInputControl::Shutdown() {
 void ZoneViewInputControl::Activate() {
     cSC4BaseViewInputControl::Activate();
     active_ = true;
+    diagonalMode_ = false;
+    diagonalThickness_ = 1;
     modifiers_ = NormalizeModifiers(0);
     previewValidationMessage_.clear();
     toolState_.SetValidationMessage({});
+    SyncDiagonalState_();
     toolState_.SetToolActive(true);
     SetCursor(GetZoneCursorId(toolState_.Snapshot().zoneType));
     UpdateCursorText_();
@@ -300,9 +418,12 @@ void ZoneViewInputControl::Activate() {
 void ZoneViewInputControl::Deactivate() {
     CancelDrag_();
     active_ = false;
+    diagonalMode_ = false;
+    diagonalThickness_ = 1;
     modifiers_ = 0;
     previewValidationMessage_.clear();
     toolState_.SetValidationMessage({});
+    SyncDiagonalState_();
     toolState_.SetToolActive(false);
     ReleaseOverrideNetworkTool_();
     ClearCursorText_();
@@ -401,10 +522,28 @@ bool ZoneViewInputControl::OnMouseDownR(const int32_t, const int32_t, const uint
 
 bool ZoneViewInputControl::OnMouseWheel(const int32_t, const int32_t, const uint32_t modifiers,
                                         const int32_t wheelDelta) {
-    (void)modifiers;
-    (void)wheelDelta;
+    const ZoneToolSnapshot snapshot = toolState_.Snapshot();
+    const uint32_t normalizedModifiers = NormalizeModifiers(modifiers);
+    modifiers_ = normalizedModifiers;
 
-    return false;
+    if (!active_ || !IsDiagonalModeActive_(snapshot) || wheelDelta == 0) {
+        return false;
+    }
+
+    const int delta = wheelDelta > 0 ? 1 : -1;
+    const int nextThickness = std::clamp(diagonalThickness_ + delta, kMinDiagonalThickness, kMaxDiagonalThickness);
+    if (nextThickness == diagonalThickness_) {
+        return true;
+    }
+
+    diagonalThickness_ = nextThickness;
+    SyncDiagonalState_();
+    UpdateCursorText_();
+    if (dragging_) {
+        UpdatePreview_();
+    }
+
+    return true;
 }
 
 bool ZoneViewInputControl::OnMouseExit() {
@@ -422,6 +561,20 @@ bool ZoneViewInputControl::OnKeyDown(const int32_t vkCode, const uint32_t modifi
     }
 
     modifiers_ = NormalizeModifiers(modifiers);
+    const ZoneToolSnapshot previousSnapshot = toolState_.Snapshot();
+
+    if (vkCode == 'D' && SupportsDiagonalMode(previousSnapshot)) {
+        diagonalMode_ = !diagonalMode_;
+        SyncDiagonalState_();
+        if (dragging_) {
+            ClearPreview_();
+            UpdatePreview_();
+        }
+        else {
+            UpdateCursorText_();
+        }
+        return true;
+    }
 
     if (vkCode == VK_SHIFT || vkCode == VK_CONTROL || vkCode == VK_MENU) {
         UpdateCursorText_();
@@ -431,7 +584,6 @@ bool ZoneViewInputControl::OnKeyDown(const int32_t vkCode, const uint32_t modifi
         return false;
     }
 
-    const ZoneToolSnapshot previousSnapshot = toolState_.Snapshot();
     bool handledAdjustment = false;
 
     switch (vkCode) {
@@ -528,6 +680,11 @@ bool ZoneViewInputControl::ShouldStack() {
 void ZoneViewInputControl::SetZoneType(const cISC4ZoneManager::ZoneType zoneType) {
     const ZoneToolSnapshot previousSnapshot = toolState_.Snapshot();
     toolState_.SetZoneType(zoneType);
+    if (!SupportsDiagonalMode(toolState_.Snapshot())) {
+        diagonalMode_ = false;
+    }
+    diagonalThickness_ = 1;
+    SyncDiagonalState_();
     SetCursor(GetZoneCursorId(zoneType));
 
     if (previousSnapshot.zoneType != zoneType && dragging_) {
@@ -535,6 +692,15 @@ void ZoneViewInputControl::SetZoneType(const cISC4ZoneManager::ZoneType zoneType
     }
 
     UpdateCursorText_();
+}
+
+bool ZoneViewInputControl::IsDiagonalModeActive_(const ZoneToolSnapshot& snapshot) const {
+    return diagonalMode_ && SupportsDiagonalMode(snapshot);
+}
+
+void ZoneViewInputControl::SyncDiagonalState_() noexcept {
+    const ZoneToolSnapshot snapshot = toolState_.Snapshot();
+    toolState_.SetDiagonalState(SupportsDiagonalMode(snapshot), diagonalMode_, diagonalThickness_);
 }
 
 bool ZoneViewInputControl::TryGetServices_(cISC4City*& city,
@@ -736,11 +902,6 @@ bool ZoneViewInputControl::ValidateSelection_(const ZoneToolSnapshot& snapshot,
     }
 
     int64_t estimatedCost = 0;
-    int64_t destructionCostTotal = 0;
-    int includedCellCount = 0;
-    int changedCellCount = 0;
-    int sameZoneCellCount = 0;
-    int demolitionCellCount = 0;
     for (int32_t z = region.bounds.topLeftY; z <= region.bounds.bottomRightY; ++z) {
         for (int32_t x = region.bounds.topLeftX; x <= region.bounds.bottomRightX; ++x) {
             if (!region.cellMap.GetValue(
@@ -749,25 +910,20 @@ bool ZoneViewInputControl::ValidateSelection_(const ZoneToolSnapshot& snapshot,
                 continue;
             }
 
-            includedCellCount++;
             const auto existingZoneType = zoneManager->GetZoneType(x, z);
             if (existingZoneType == cISC4ZoneManager::ZoneType::Plopped) {
                 continue;
             }
 
             if (existingZoneType == snapshot.zoneType) {
-                sameZoneCellCount++;
                 continue;
             }
 
-            changedCellCount++;
             if (existingZoneType != cISC4ZoneManager::ZoneType::None) {
                 int64_t destructionCost = 0;
                 if (TryGetZoneDestructionCost(zoneManager, existingZoneType, destructionCost)) {
                     estimatedCost += destructionCost;
-                    destructionCostTotal += destructionCost;
                 }
-                demolitionCellCount++;
             }
 
             if (snapshot.zoneType != cISC4ZoneManager::ZoneType::None) {
@@ -830,7 +986,23 @@ void ZoneViewInputControl::UpdateCursorText_() {
 
     toolState_.SetValidationMessage(previewValidationMessage_);
 
-    ZoneToolTipText text = BuildZoneToolTipText(toolState_.Snapshot());
+    const ZoneToolSnapshot snapshot = toolState_.Snapshot();
+    const bool diagonalModeActive = IsDiagonalModeActive_(snapshot);
+    ZoneToolTipText text = BuildZoneToolTipText(snapshot);
+    if (SupportsDiagonalMode(snapshot)) {
+        text.body.append("\n");
+        text.body.append(diagonalModeActive ? "Diagonal: On (D toggles)" : "Diagonal: Off (D toggles)");
+    }
+    if (diagonalModeActive) {
+        char diagonalBuffer[64] = {};
+        std::snprintf(
+            diagonalBuffer,
+            sizeof(diagonalBuffer),
+            "Diagonal width: %d (wheel)",
+            diagonalThickness_);
+        text.body.append("\n");
+        text.body.append(diagonalBuffer);
+    }
     if (!previewValidationMessage_.empty()) {
         text.body.append("\n");
         text.body.append(previewValidationMessage_);
@@ -862,6 +1034,24 @@ bool ZoneViewInputControl::UpdatePreview_() {
 
     SC4CellRegion<int32_t> zoneRegion = BuildZoneManagerRegion_();
     SC4CellRegion<long> region = BuildDeveloperRegion_();
+    const bool diagonalModeActive = IsDiagonalModeActive_(snapshot);
+    ApplyDiagonalMaskIfNeeded(
+        zoneRegion,
+        diagonalModeActive,
+        startCellX_,
+        startCellZ_,
+        currentCellX_,
+        currentCellZ_,
+        diagonalThickness_);
+    ApplyDiagonalMaskIfNeeded(
+        region,
+        diagonalModeActive,
+        startCellX_,
+        startCellZ_,
+        currentCellX_,
+        currentCellZ_,
+        diagonalThickness_);
+
     int maskedPloppedCellCount = 0;
     if (snapshot.zoneType != cISC4ZoneManager::ZoneType::None) {
         maskedPloppedCellCount = ApplyPloppedLotMask_(zoneRegion);
@@ -895,10 +1085,15 @@ bool ZoneViewInputControl::UpdatePreview_() {
         zoneDeveloper,
         EnsureOverrideNetworkTool_(snapshot.networkMode));
 
-    SC4Point<long> focusPoint{static_cast<long>(currentCellX_), static_cast<long>(currentCellZ_)};
-    zoneDeveloper->HighlightParcels(region, snapshot.zoneType, &focusPoint, nullptr);
+    // Passing a focus point makes the stock zone developer collapse the preview
+    // to the connected component containing that cell. For split regions such as
+    // zoning across existing roads, that hides the other valid components.
+    zoneDeveloper->HighlightParcels(region, snapshot.zoneType, nullptr, nullptr);
     if (validationFailure == ValidationFailure_::None) {
         previewValidationMessage_ = FormatPloppedExclusionMessage(maskedPloppedCellCount, true);
+        if (diagonalModeActive) {
+            AppendMessageLine(previewValidationMessage_, FormatDiagonalStatusMessage(diagonalThickness_));
+        }
     }
     UpdateCursorText_();
     return true;
@@ -923,6 +1118,24 @@ bool ZoneViewInputControl::CommitSelection_() {
 
     SC4CellRegion<int32_t> zoneRegion = BuildZoneManagerRegion_();
     SC4CellRegion<long> developerRegion = BuildDeveloperRegion_();
+    const bool diagonalModeActive = IsDiagonalModeActive_(snapshot);
+    ApplyDiagonalMaskIfNeeded(
+        zoneRegion,
+        diagonalModeActive,
+        startCellX_,
+        startCellZ_,
+        currentCellX_,
+        currentCellZ_,
+        diagonalThickness_);
+    ApplyDiagonalMaskIfNeeded(
+        developerRegion,
+        diagonalModeActive,
+        startCellX_,
+        startCellZ_,
+        currentCellX_,
+        currentCellZ_,
+        diagonalThickness_);
+
     int maskedPloppedCellCount = 0;
     if (snapshot.zoneType != cISC4ZoneManager::ZoneType::None) {
         maskedPloppedCellCount = ApplyPloppedLotMask_(zoneRegion);
@@ -950,6 +1163,9 @@ bool ZoneViewInputControl::CommitSelection_() {
     }
 
     previewValidationMessage_ = FormatPloppedExclusionMessage(maskedPloppedCellCount, false);
+    if (diagonalModeActive) {
+        AppendMessageLine(previewValidationMessage_, FormatDiagonalStatusMessage(diagonalThickness_));
+    }
 
     ZoneDeveloperHooks::ClearLiveHighlight(zoneDeveloper);
     ApplyZoneDeveloperOptions_(zoneDeveloper);
@@ -1021,9 +1237,8 @@ void ZoneViewInputControl::ApplyZoneDeveloperOptions_(cISC4ZoneDeveloper* zoneDe
         return;
     }
 
-    const ZoneToolSnapshot snapshot = toolState_.Snapshot();
     const bool alternateOrientation = IsAltActive(modifiers_);
-    const bool placeStreets = snapshot.networkMode != ZoneInternalNetworkMode::None;
+    const bool placeStreets = toolState_.Snapshot().networkMode != ZoneInternalNetworkMode::None;
     const bool customZoneSize = IsControlActive(modifiers_);
     zoneDeveloper->SetOptions(alternateOrientation, placeStreets, customZoneSize);
 }

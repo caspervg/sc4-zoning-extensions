@@ -22,6 +22,9 @@ struct ZoneToolSnapshot
     int parcelWidth = 3;
     int parcelLength = 3;
     int streetInterval = 0;
+    bool diagonalSupported = false;
+    bool diagonalMode = false;
+    int diagonalThickness = 1;
     bool toolActive = false;
     std::string validationMessage;
 };
@@ -60,6 +63,7 @@ public:
     void SetZoneType(cISC4ZoneManager::ZoneType zoneType) noexcept;
     void SetToolActive(bool value) noexcept;
     void SetValidationMessage(std::string value) noexcept;
+    void SetDiagonalState(bool supported, bool enabled, int thickness) noexcept;
     void CycleNetworkMode(int delta) noexcept;
     void AdjustParcelWidth(int delta) noexcept;
     void AdjustParcelLength(int delta) noexcept;
