@@ -132,3 +132,5 @@ _deps
 CMakeUserPresets.json
 tmp/
 vcpkg_installed/
+cmake-build-*
+.mcp.json
