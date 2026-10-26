@@ -744,8 +744,8 @@ bool ZoneViewInputControl::PickCell_(const int32_t screenX, const int32_t screen
 
     int pickedCellX = 0;
     int pickedCellZ = 0;
-    if (!city->PositionToCell(world[0], world[2], pickedCellX, pickedCellZ) ||
-        !city->CellIsInBounds(pickedCellX, pickedCellZ)) {
+    city->PositionToCell(world[0], world[2], pickedCellX, pickedCellZ);
+    if (!city->CellIsInBounds(pickedCellX, pickedCellZ)) {
         return false;
     }
 
