@@ -4,17 +4,15 @@ if(POLICY CMP0091)
     cmake_policy(SET CMP0091 NEW)
 endif()
 
-# SimCity 4 plugins must be 32-bit DLLs.
-set(CMAKE_GENERATOR_PLATFORM "Win32" CACHE STRING "Target platform" FORCE)
-
-# Enable vcpkg manifest mode before project().
-set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_SOURCE_DIR}/vendor/vcpkg/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
-set(VCPKG_MANIFEST_MODE ON CACHE BOOL "Enable vcpkg manifest mode")
-set(VCPKG_MANIFEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}" CACHE STRING "vcpkg manifest directory")
-set(VCPKG_INSTALLED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg_installed" CACHE STRING "vcpkg installed directory")
-set(VCPKG_TARGET_TRIPLET "x86-windows-static" CACHE STRING "vcpkg target triplet" FORCE)
-
 project(SC4ZoningExtensions VERSION 0.0.1 LANGUAGES C CXX)
+
+# SimCity 4 only loads 32-bit DLLs.
+if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
+    message(STATUS "SC4ZoningExtensions DLL is only built for 32-bit Windows. Skipping target.")
+    return()
+endif()
+
+set(SC4RS_ROOT "${CMAKE_SOURCE_DIR}/vendor/sc4-render-services" CACHE PATH "Path to sc4-render-services")
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -25,7 +23,7 @@ if(WIN32)
 endif()
 
 if(MSVC)
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
     add_compile_options(/W4 /permissive-)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 
@@ -33,37 +31,27 @@ if(MSVC)
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /DEBUG /OPT:REF /OPT:ICF")
 endif()
 
-find_package(spdlog CONFIG REQUIRED)
+add_subdirectory(${SC4RS_ROOT}/vendor/spdlog ${CMAKE_CURRENT_BINARY_DIR}/spdlog)
 
-add_subdirectory(vendor/gzcom-dll)
-
-set(IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/sc4-render-services/vendor/d3d7imgui/ImGui")
-set(IMGUI_CORE_SOURCES
-    "${IMGUI_DIR}/imgui.cpp"
-    "${IMGUI_DIR}/imgui_demo.cpp"
-    "${IMGUI_DIR}/imgui_draw.cpp"
-    "${IMGUI_DIR}/imgui_tables.cpp"
-    "${IMGUI_DIR}/imgui_widgets.cpp"
+set(GZCOM_DIR "${CMAKE_SOURCE_DIR}/vendor/gzcom-dll/gzcom-dll")
+file(GLOB_RECURSE GZCOM_SOURCES CONFIGURE_DEPENDS
+    "${GZCOM_DIR}/src/*.cpp"
 )
-set(IMGUI_BACKENDS
-    "${IMGUI_DIR}/imgui_impl_win32.cpp"
-    "${IMGUI_DIR}/imgui_impl_dx7.cpp"
+list(REMOVE_ITEM GZCOM_SOURCES
+    "${GZCOM_DIR}/src/main.cpp"
+    "${GZCOM_DIR}/src/cGZCityHallUpgradeDllDirector.cpp"
+    "${GZCOM_DIR}/src/cGZCustomDllDirector.cpp"
+    "${GZCOM_DIR}/src/cGZExampleDllDirector.cpp"
+    "${GZCOM_DIR}/src/cGZExtraCheatsDllDirector.cpp"
+    "${GZCOM_DIR}/src/cGZExtraExtraCheatsDllDirector.cpp"
 )
 
-add_library(imgui SHARED
-    ${IMGUI_CORE_SOURCES}
-    ${IMGUI_BACKENDS}
-)
+add_library(gzcom2 STATIC ${GZCOM_SOURCES})
+target_include_directories(gzcom2 PUBLIC "${GZCOM_DIR}/include")
 
-target_include_directories(imgui PUBLIC
-    "${IMGUI_DIR}"
-)
-
-target_compile_definitions(imgui PRIVATE IMGUI_DLL_EXPORT)
-
-if(WIN32)
-    target_link_libraries(imgui PRIVATE user32 gdi32 ddraw dxguid)
-endif()
+# Builds SC4RenderServices from the submodule, reusing gzcom2 and spdlog::spdlog from this project.
+# EXCLUDE_FROM_ALL keeps its other targets out of the build.
+add_subdirectory(${SC4RS_ROOT} ${CMAKE_CURRENT_BINARY_DIR}/sc4-render-services EXCLUDE_FROM_ALL)
 
 add_library(${PROJECT_NAME} SHARED
     src/main.cpp
@@ -80,23 +68,19 @@ add_library(${PROJECT_NAME} SHARED
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    "${CMAKE_CURRENT_SOURCE_DIR}/vendor/gzcom-dll/gzcom-dll/include"
-    "${CMAKE_CURRENT_SOURCE_DIR}/vendor/sc4-render-services/src"
-    "${CMAKE_CURRENT_SOURCE_DIR}/vendor/sc4-render-services/src/public"
-    "${IMGUI_DIR}"
+    "${SC4RS_ROOT}/src"
+    "${SC4RS_ROOT}/src/public"
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
-    gzcom_dll
-    imgui
+    gzcom2
     spdlog::spdlog
-    delayimp
     version
 )
 
-if(MSVC)
-    target_link_options(${PROJECT_NAME} PRIVATE "/DELAYLOAD:imgui.dll")
-endif()
+# ImGui is compiled into SC4RenderServices.dll and exported from it, so link that. The import is
+# delay-loaded: the game may load this plugin before SC4RenderServices.dll.
+sc4rs_use_imgui(${PROJECT_NAME})
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
     OUTPUT_NAME "SC4ZoningExtensions"

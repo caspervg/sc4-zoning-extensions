@@ -1,0 +1,256 @@
+name: Windows CI
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+env:
+  DLL_ARTIFACT_NAME: SC4ZoningExtensions-dll-${{ github.sha }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-dll:
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Build DLL
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A Win32
+          cmake --build build --config Release --target SC4ZoningExtensions --parallel
+
+      - name: Smoke test build outputs
+        shell: powershell
+        run: |
+          $dllPath = Join-Path "${{ github.workspace }}" "build\Release\SC4ZoningExtensions.dll"
+          if (-not (Test-Path $dllPath)) {
+            throw "Missing DLL output at $dllPath"
+          }
+          if ((Get-Item $dllPath).Length -le 0) {
+            throw "DLL output is empty: $dllPath"
+          }
+
+      - name: Generate SBOM for DLL (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          file: build/Release/SC4ZoningExtensions.dll
+          format: spdx-json
+          output-file: SC4ZoningExtensions.spdx.json
+          upload-artifact: false
+
+      - name: Stage raw DLL artifact
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force artifact-dll | Out-Null
+          Copy-Item build\Release\SC4ZoningExtensions.dll artifact-dll\SC4ZoningExtensions.dll -Force
+          Copy-Item SC4ZoningExtensions.spdx.json artifact-dll\SC4ZoningExtensions.spdx.json -Force
+
+      - name: Upload raw DLL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DLL_ARTIFACT_NAME }}
+          compression-level: 0
+          path: |
+            artifact-dll/SC4ZoningExtensions.dll
+            artifact-dll/SC4ZoningExtensions.spdx.json
+
+  package-installer:
+    needs: [build-dll]
+    runs-on: windows-2022
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Download DLL artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.DLL_ARTIFACT_NAME }}
+          path: artifacts/dll
+
+      - name: Assemble package
+        shell: bash
+        run: |
+          mkdir -p dist-package
+
+          dll_path="$(find artifacts/dll -type f -name SC4ZoningExtensions.dll | head -n 1)"
+          sbom_path="$(find artifacts/dll -type f -name SC4ZoningExtensions.spdx.json | head -n 1)"
+          if [ -z "$dll_path" ]; then
+            echo "Could not find SC4ZoningExtensions.dll in downloaded artifact"
+            find artifacts/dll -type f | sort
+            exit 1
+          fi
+          if [ -z "$sbom_path" ]; then
+            echo "Could not find SC4ZoningExtensions.spdx.json in downloaded artifact"
+            find artifacts/dll -type f | sort
+            exit 1
+          fi
+
+          cp "$dll_path" dist-package/SC4ZoningExtensions.dll
+          cp "$sbom_path" dist-package/SC4ZoningExtensions.spdx.json
+          cp dist/README.txt dist-package/
+          cp LICENSE.txt dist-package/
+          cp dist/THIRD_PARTY_NOTICES.txt dist-package/
+          cp dist/SC4ZoningExtensionsInstaller.nsi dist-package/
+
+          echo "Package contents:"
+          find dist-package -type f | sort
+
+      - name: Smoke test package inputs
+        shell: powershell
+        run: |
+          $packageDir = Join-Path "${{ github.workspace }}" "dist-package"
+          $requiredFiles = @(
+            "SC4ZoningExtensions.dll",
+            "SC4ZoningExtensions.spdx.json",
+            "SC4ZoningExtensionsInstaller.nsi",
+            "README.txt",
+            "LICENSE.txt",
+            "THIRD_PARTY_NOTICES.txt"
+          )
+          foreach ($file in $requiredFiles) {
+            $path = Join-Path $packageDir $file
+            if (-not (Test-Path $path)) {
+              throw "Missing package input: $path"
+            }
+            if ((Get-Item $path).Length -le 0) {
+              throw "Package input is empty: $path"
+            }
+          }
+
+      - name: Install NSIS
+        run: choco install nsis -y
+
+      - name: Build installer
+        shell: powershell
+        run: |
+          $rootDir = "${{ github.workspace }}"
+          $refName = "${{ github.ref_name }}"
+          $version = if ($refName -match '^v(.+)') { $Matches[1] } else { "${{ github.sha }}".Substring(0, 7) }
+          $minRenderServicesVersionPath = Join-Path $rootDir "dist\MIN_SC4_RENDER_SERVICES.txt"
+          $minRenderServicesVersion = (Get-Content -Path $minRenderServicesVersionPath -Raw).Trim()
+          if ($minRenderServicesVersion -notmatch '^v?(\d+)\.(\d+)\.(\d+)$') {
+            throw "Invalid SC4 Render Services minimum version in ${minRenderServicesVersionPath}: '$minRenderServicesVersion'"
+          }
+          $minRenderServicesMajor = $Matches[1]
+          $minRenderServicesMinor = $Matches[2]
+          $minRenderServicesBuild = $Matches[3]
+          Write-Host "Building installer for version: $version"
+          Write-Host "Minimum SC4 Render Services version: $minRenderServicesMajor.$minRenderServicesMinor.$minRenderServicesBuild"
+          Set-Location dist-package
+          & "C:\Program Files (x86)\NSIS\makensis.exe" `
+            /DAPP_VERSION=$version `
+            /DMIN_RENDER_SERVICES_VERSION_MAJOR=$minRenderServicesMajor `
+            /DMIN_RENDER_SERVICES_VERSION_MINOR=$minRenderServicesMinor `
+            /DMIN_RENDER_SERVICES_VERSION_BUILD=$minRenderServicesBuild `
+            SC4ZoningExtensionsInstaller.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
+          $installer = Get-ChildItem -Filter "SC4ZoningExtensions-*-Setup.exe" | Select-Object -First 1
+          if (-not $installer) {
+            throw "Installer was not produced"
+          }
+          if ($installer.Length -le 0) {
+            throw "Installer is empty: $($installer.FullName)"
+          }
+          Write-Host "Installer contents:"
+          Get-ChildItem -Filter "*.exe" | Select-Object Name, Length
+
+      - name: Generate SHA256 checksums
+        shell: powershell
+        run: |
+          Set-Location dist-package
+          $installer = Get-ChildItem -Filter "SC4ZoningExtensions-*-Setup.exe" | Select-Object -First 1
+          if (-not $installer) {
+            throw "Installer was not produced"
+          }
+          $targets = @(
+            $installer.Name,
+            "SC4ZoningExtensions.dll",
+            "SC4ZoningExtensions.spdx.json",
+            "README.txt",
+            "LICENSE.txt",
+            "THIRD_PARTY_NOTICES.txt"
+          )
+          $lines = foreach ($target in $targets) {
+            if (-not (Test-Path $target)) {
+              throw "Cannot hash missing package file: $target"
+            }
+            $hash = Get-FileHash -Algorithm SHA256 -Path $target
+            "{0}  {1}" -f $hash.Hash.ToLowerInvariant(), $target
+          }
+          $lines | Set-Content -Path SHA256SUMS.txt -Encoding ascii
+          Get-Content SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SC4ZoningExtensions-${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || github.sha }}
+          compression-level: 0
+          path: dist-package/
+
+  validate-tag:
+    name: Validate Release Tag
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Validate version tag
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tags must match vMAJOR.MINOR.PATCH, for example v1.0.0. Got: $TAG_NAME"
+            exit 1
+          fi
+
+  release:
+    needs: [package-installer, validate-tag]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: SC4ZoningExtensions-${{ github.ref_name }}
+          path: dist-package
+
+      - name: Create release zip
+        run: |
+          VERSION=${{ github.ref_name }}
+          zip -j SC4ZoningExtensions-${VERSION}.zip \
+            dist-package/SC4ZoningExtensions-*-Setup.exe \
+            dist-package/README.txt \
+            dist-package/LICENSE.txt \
+            dist-package/THIRD_PARTY_NOTICES.txt \
+            dist-package/SC4ZoningExtensions.spdx.json \
+            dist-package/SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            SC4ZoningExtensions-${{ github.ref_name }}.zip
+            dist-package/SC4ZoningExtensions.spdx.json
+            dist-package/SHA256SUMS.txt
+          generate_release_notes: true
