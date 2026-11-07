@@ -42,6 +42,9 @@ void ZoneStatusPanel::OnRender()
     ImGui::Separator();
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
     ImGui::TextUnformatted(text.modifiersLine.c_str());
+    if (!text.controlsLine.empty()) {
+        ImGui::TextUnformatted(text.controlsLine.c_str());
+    }
     if (!text.wheelLine.empty()) {
         ImGui::TextUnformatted(text.wheelLine.c_str());
     }

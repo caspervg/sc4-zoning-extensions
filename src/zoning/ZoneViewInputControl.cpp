@@ -1,8 +1,14 @@
 // ReSharper disable CppDFAUnreachableFunctionCall
 // ReSharper disable CppDFAConstantConditions
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include "zoning/ZoneViewInputControl.hpp"
 
+#include "cIGZCanvas.h"
 #include "cIGZSndSys.h"
+#include "cIGZWin.h"
+#include "cIGZWinMgr.h"
 #include "cISC4App.h"
 #include "cISC4BudgetSimulator.h"
 #include "cISC4City.h"
@@ -26,11 +32,13 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#include <windowsx.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <utility>
 
 namespace {
     constexpr uint32_t kCursorTextId = 0x57C44A11;
@@ -39,6 +47,8 @@ namespace {
     constexpr uint16_t kSupportedGameVersion = 641;
     constexpr int kMinDiagonalThickness = 1;
     constexpr int kMaxDiagonalThickness = 24;
+    // Tilt messages closer together than this, in the same direction, are one tilt.
+    constexpr uint64_t kHorizontalWheelBurstMs = 120;
     constexpr size_t kZoneConstraintTableSize = 16;
     constexpr size_t kZoneMaxSlopeOffset = 0x198;
     constexpr size_t kZoneCostOffset = 0x1E0;
@@ -384,13 +394,27 @@ namespace {
 }
 
 ZoneViewInputControl::ZoneViewInputControl(ZoneToolState& toolState)
-    : cSC4BaseViewInputControl(kZoneViewInputControlID)
+    : cSC4BaseViewInputControlEx(kZoneViewInputControlID)
       , toolState_(toolState) {}
 
 ZoneViewInputControl::~ZoneViewInputControl() = default;
 
 bool ZoneViewInputControl::Init() {
-    return cSC4BaseViewInputControl::Init();
+    if (!cSC4BaseViewInputControlEx::Init()) {
+        return false;
+    }
+
+    if (!canvasW32_ && windowManager) {
+        cIGZCanvas* canvas = windowManager->GetCanvas();
+        cRZAutoRefCount<cIGZCanvasW32> localCanvasW32;
+        if (canvas &&
+            canvas->QueryInterface(GZIID_cIGZCanvasW32, localCanvasW32.AsPPVoid()) &&
+            localCanvasW32->AddWinProcFilter(&horizontalWheelFilter_, true)) {
+            canvasW32_ = localCanvasW32;
+        }
+    }
+
+    return true;
 }
 
 bool ZoneViewInputControl::Shutdown() {
@@ -398,7 +422,11 @@ bool ZoneViewInputControl::Shutdown() {
     active_ = false;
     toolState_.SetToolActive(false);
     ReleaseOverrideNetworkTool_();
-    return cSC4BaseViewInputControl::Shutdown();
+    if (canvasW32_) {
+        canvasW32_->AddWinProcFilter(&horizontalWheelFilter_, false);
+        canvasW32_.Reset();
+    }
+    return cSC4BaseViewInputControlEx::Shutdown();
 }
 
 void ZoneViewInputControl::Activate() {
@@ -415,23 +443,31 @@ void ZoneViewInputControl::Activate() {
     UpdateCursorText_();
 }
 
+// The game also deactivates a control it covers, e.g. with its right-drag camera pan, and does
+// not activate it again when that ends. So this only pauses: active_ stays set until Shutdown,
+// and IsLive_ marks the tool active again once it is back on top.
 void ZoneViewInputControl::Deactivate() {
     CancelDrag_();
-    active_ = false;
-    diagonalMode_ = false;
-    diagonalThickness_ = 1;
     modifiers_ = 0;
     previewValidationMessage_.clear();
     toolState_.SetValidationMessage({});
-    SyncDiagonalState_();
     toolState_.SetToolActive(false);
     ReleaseOverrideNetworkTool_();
     ClearCursorText_();
-    cSC4BaseViewInputControl::Deactivate();
+    ResetWheelState_();
+    cSC4BaseViewInputControlEx::Deactivate();
+}
+
+bool ZoneViewInputControl::IsLive_() {
+    if (!active_ || !IsOnTop()) {
+        return false;
+    }
+    toolState_.SetToolActive(true);
+    return true;
 }
 
 bool ZoneViewInputControl::OnMouseDownL(const int32_t x, const int32_t z, const uint32_t modifiers) {
-    if (!active_ || !IsOnTop()) {
+    if (!IsLive_()) {
         return false;
     }
 
@@ -475,7 +511,7 @@ bool ZoneViewInputControl::OnMouseUpL(const int32_t x, const int32_t z, const ui
 }
 
 bool ZoneViewInputControl::OnMouseMove(const int32_t x, const int32_t z, const uint32_t modifiers) {
-    if (!active_) {
+    if (!IsLive_()) {
         return false;
     }
 
@@ -505,44 +541,104 @@ bool ZoneViewInputControl::OnMouseMove(const int32_t x, const int32_t z, const u
     return true;
 }
 
-bool ZoneViewInputControl::OnMouseDownR(const int32_t, const int32_t, const uint32_t modifiers) {
+bool ZoneViewInputControl::OnMouseWheel(const int32_t, const int32_t, const uint32_t modifiers,
+                                        const int32_t wheelDelta) {
+    LOG_DEBUG("Vertical wheel: delta={}, active={}, dragging={}", wheelDelta, active_, dragging_);
+
+    const ZoneToolSnapshot snapshot = toolState_.Snapshot();
     modifiers_ = NormalizeModifiers(modifiers);
 
-    if (!active_) {
+    if (wheelDelta == 0 || !IsLive_()) {
         return false;
     }
 
-    if (dragging_) {
-        CancelDrag_();
+    const ZoneControlSettings& controls = snapshot.controls;
+    WheelTarget_ target = WheelTarget_::None;
+
+    const std::pair<ZoneMouseButton, WheelTarget_> wheelButtons[] = {
+        {controls.widthWheelButton, WheelTarget_::Width},
+        {controls.depthWheelButton, WheelTarget_::Depth},
+        {controls.streetIntervalWheelButton, WheelTarget_::StreetInterval},
+    };
+    for (const auto& [button, buttonTarget] : wheelButtons) {
+        if (IsControlButtonHeld_(button)) {
+            wheelUsedButtons_ |= static_cast<uint8_t>(1u << static_cast<uint32_t>(button));
+            target = buttonTarget;
+            break;
+        }
     }
 
-    EndInput();
+    if (target == WheelTarget_::None) {
+        if (IsControlButtonHeld_(controls.zoomButton)) {
+            // Holding the zoom button gives the wheel back to the camera.
+            wheelUsedButtons_ |= static_cast<uint8_t>(1u << static_cast<uint32_t>(controls.zoomButton));
+            wheelAccumulator_ = 0;
+            wheelTarget_ = WheelTarget_::None;
+            return false;
+        }
+
+        if (IsDiagonalModeActive_(snapshot)) {
+            target = WheelTarget_::DiagonalThickness;
+        }
+        else if (controls.verticalWheel == ZoneVerticalWheelMode::Depth ||
+                 (controls.verticalWheel == ZoneVerticalWheelMode::DepthWhileDragging && dragging_)) {
+            target = WheelTarget_::Depth;
+        }
+        else {
+            wheelAccumulator_ = 0;
+            wheelTarget_ = WheelTarget_::None;
+            return false;
+        }
+    }
+
+    // Smooth-scrolling wheels send small deltas; add them up to one step per notch.
+    if (target != wheelTarget_ || (wheelAccumulator_ > 0) != (wheelDelta > 0)) {
+        wheelTarget_ = target;
+        wheelAccumulator_ = 0;
+    }
+    wheelAccumulator_ += wheelDelta;
+    if (wheelAccumulator_ <= -WHEEL_DELTA || wheelAccumulator_ >= WHEEL_DELTA) {
+        const int steps = wheelAccumulator_ > 0 ? 1 : -1;
+        wheelAccumulator_ = 0;
+        ApplyWheelStep_(target, steps, snapshot);
+    }
+
     return true;
 }
 
-bool ZoneViewInputControl::OnMouseWheel(const int32_t, const int32_t, const uint32_t modifiers,
-                                        const int32_t wheelDelta) {
-    const ZoneToolSnapshot snapshot = toolState_.Snapshot();
-    const uint32_t normalizedModifiers = NormalizeModifiers(modifiers);
-    modifiers_ = normalizedModifiers;
+bool ZoneViewInputControl::OnMouseWheelHorizontal_(const int32_t wheelDelta) {
+    LOG_DEBUG("Horizontal wheel: delta={}, active={}", wheelDelta, active_);
 
-    if (!active_ || !IsDiagonalModeActive_(snapshot) || wheelDelta == 0) {
+    const ZoneToolSnapshot snapshot = toolState_.Snapshot();
+    const int unitsPerStep = snapshot.controls.horizontalWheelUnitsPerStep;
+    if (wheelDelta == 0 || !snapshot.controls.horizontalWheel || !IsLive_()) {
         return false;
     }
 
-    const int delta = wheelDelta > 0 ? 1 : -1;
-    const int nextThickness = std::clamp(diagonalThickness_ + delta, kMinDiagonalThickness, kMaxDiagonalThickness);
-    if (nextThickness == diagonalThickness_) {
-        return true;
-    }
+    modifiers_ = NormalizeModifiers(0);
 
-    diagonalThickness_ = nextThickness;
-    SyncDiagonalState_();
-    UpdateCursorText_();
-    if (dragging_) {
-        UpdatePreview_();
+    // A tilt arrives as a burst of messages for as long as the wheel is held. The burst's first
+    // message steps once; later ones only step when HorizontalWheelUnitsPerStep is set.
+    const uint64_t now = GetTickCount64();
+    const int direction = wheelDelta > 0 ? 1 : -1;
+    int steps = 0;
+    if (now - horizontalWheelLastTick_ <= kHorizontalWheelBurstMs && direction == horizontalWheelDirection_) {
+        if (unitsPerStep > 0) {
+            horizontalWheelAccumulator_ += std::abs(wheelDelta);
+            steps = horizontalWheelAccumulator_ / unitsPerStep * direction;
+            horizontalWheelAccumulator_ %= unitsPerStep;
+        }
     }
+    else {
+        horizontalWheelAccumulator_ = 0;
+        horizontalWheelDirection_ = direction;
+        steps = direction;
+    }
+    horizontalWheelLastTick_ = now;
 
+    if (steps != 0) {
+        ApplyWheelStep_(WheelTarget_::Width, steps, snapshot);
+    }
     return true;
 }
 
@@ -556,7 +652,7 @@ bool ZoneViewInputControl::OnMouseExit() {
 }
 
 bool ZoneViewInputControl::OnKeyDown(const int32_t vkCode, const uint32_t modifiers) {
-    if (!active_) {
+    if (!IsLive_()) {
         return false;
     }
 
@@ -627,19 +723,7 @@ bool ZoneViewInputControl::OnKeyDown(const int32_t vkCode, const uint32_t modifi
     }
 
     if (handledAdjustment) {
-        if (dragging_) {
-            ClearPreview_();
-        }
-
-        const ZoneToolSnapshot nextSnapshot = toolState_.Snapshot();
-        if (previousSnapshot.networkMode != nextSnapshot.networkMode) {
-            ReleaseOverrideNetworkTool_();
-        }
-
-        UpdateCursorText_();
-        if (dragging_) {
-            UpdatePreview_();
-        }
+        ApplyAdjustment_(previousSnapshot);
         return true;
     }
 
@@ -658,7 +742,7 @@ bool ZoneViewInputControl::OnKeyDown(const int32_t vkCode, const uint32_t modifi
 }
 
 bool ZoneViewInputControl::OnKeyUp(const int32_t vkCode, const uint32_t modifiers) {
-    if (!active_) {
+    if (!IsLive_()) {
         return false;
     }
 
@@ -675,6 +759,186 @@ bool ZoneViewInputControl::OnKeyUp(const int32_t vkCode, const uint32_t modifier
 
 bool ZoneViewInputControl::ShouldStack() {
     return true;
+}
+
+bool ZoneViewInputControl::OnMouseDownM(const int32_t, const int32_t, const uint32_t) {
+    return OnControlButtonDown_(ZoneMouseButton::Middle);
+}
+
+bool ZoneViewInputControl::OnMouseUpM(const int32_t, const int32_t, const uint32_t) {
+    return OnControlButtonUp_(ZoneMouseButton::Middle);
+}
+
+bool ZoneViewInputControl::OnMouseDownX(const int32_t, const int32_t, const uint32_t, const uint32_t button) {
+    return OnControlButtonDown_(button == XBUTTON1 ? ZoneMouseButton::XButton1 : ZoneMouseButton::XButton2);
+}
+
+bool ZoneViewInputControl::OnMouseUpX(const int32_t, const int32_t, const uint32_t, const uint32_t button) {
+    return OnControlButtonUp_(button == XBUTTON1 ? ZoneMouseButton::XButton1 : ZoneMouseButton::XButton2);
+}
+
+namespace {
+    bool IsBoundButton(const ZoneControlSettings& controls, const ZoneMouseButton button) {
+        return button != ZoneMouseButton::None &&
+               (controls.zoomButton == button ||
+                controls.widthWheelButton == button ||
+                controls.depthWheelButton == button ||
+                controls.streetIntervalWheelButton == button ||
+                controls.presetPreviousButton == button ||
+                controls.presetNextButton == button);
+    }
+}
+
+bool ZoneViewInputControl::OnControlButtonDown_(const ZoneMouseButton button) {
+    if (!IsBoundButton(toolState_.Snapshot().controls, button) || !IsLive_()) {
+        return false;
+    }
+
+    wheelUsedButtons_ &= static_cast<uint8_t>(~(1u << static_cast<uint32_t>(button)));
+    return true;
+}
+
+bool ZoneViewInputControl::OnControlButtonUp_(const ZoneMouseButton button) {
+    const ZoneToolSnapshot snapshot = toolState_.Snapshot();
+    if (!IsBoundButton(snapshot.controls, button) || !IsLive_()) {
+        return false;
+    }
+
+    const uint8_t bit = static_cast<uint8_t>(1u << static_cast<uint32_t>(button));
+    const bool turnedWheel = (wheelUsedButtons_ & bit) != 0;
+    wheelUsedButtons_ &= static_cast<uint8_t>(~bit);
+    if (turnedWheel) {
+        return true;
+    }
+
+    int delta = 0;
+    if (snapshot.controls.presetNextButton == button) {
+        delta = 1;
+    }
+    else if (snapshot.controls.presetPreviousButton == button) {
+        delta = -1;
+    }
+
+    if (delta != 0 && toolState_.CyclePreset(delta)) {
+        ApplyAdjustment_(snapshot);
+    }
+    return true;
+}
+
+bool ZoneViewInputControl::IsControlButtonHeld_(const ZoneMouseButton button) const {
+    switch (button) {
+    case ZoneMouseButton::Middle:
+        return IsMiddleMouseDown();
+    case ZoneMouseButton::XButton1:
+        return IsXMouseDown(XBUTTON1);
+    case ZoneMouseButton::XButton2:
+        return IsXMouseDown(XBUTTON2);
+    default:
+        return false;
+    }
+}
+
+void ZoneViewInputControl::ApplyAdjustment_(const ZoneToolSnapshot& previousSnapshot) {
+    if (dragging_) {
+        ClearPreview_();
+    }
+
+    if (previousSnapshot.networkMode != toolState_.Snapshot().networkMode) {
+        ReleaseOverrideNetworkTool_();
+    }
+
+    UpdateCursorText_();
+    if (dragging_) {
+        UpdatePreview_();
+    }
+}
+
+void ZoneViewInputControl::ApplyWheelStep_(const WheelTarget_ target, const int steps,
+                                           const ZoneToolSnapshot& previousSnapshot) {
+    switch (target) {
+    case WheelTarget_::Width:
+        toolState_.AdjustParcelWidth(steps);
+        ApplyAdjustment_(previousSnapshot);
+        break;
+    case WheelTarget_::Depth:
+        toolState_.AdjustParcelLength(steps);
+        ApplyAdjustment_(previousSnapshot);
+        break;
+    case WheelTarget_::StreetInterval:
+        toolState_.AdjustStreetInterval(steps);
+        ApplyAdjustment_(previousSnapshot);
+        break;
+    case WheelTarget_::DiagonalThickness: {
+        const int nextThickness =
+            std::clamp(diagonalThickness_ + steps, kMinDiagonalThickness, kMaxDiagonalThickness);
+        if (nextThickness != diagonalThickness_) {
+            diagonalThickness_ = nextThickness;
+            SyncDiagonalState_();
+            UpdateCursorText_();
+            if (dragging_) {
+                UpdatePreview_();
+            }
+        }
+        break;
+    }
+    case WheelTarget_::None:
+        break;
+    }
+}
+
+void ZoneViewInputControl::ResetWheelState_() noexcept {
+    wheelAccumulator_ = 0;
+    wheelTarget_ = WheelTarget_::None;
+    wheelUsedButtons_ = 0;
+    horizontalWheelAccumulator_ = 0;
+    horizontalWheelDirection_ = 0;
+}
+
+// ponytail: copy of cSC4BaseViewInputControlEx::IsOverView (private there); move the tilt wheel
+// into gzcom-dll's Ex class (a virtual next to OnMouseUpX) to drop this and the filter.
+bool ZoneViewInputControl::IsCursorOverView_(const int32_t clientX, const int32_t clientZ) const {
+    if (!windowManager) {
+        return false;
+    }
+
+    cIGZWin* capture = windowManager->GZGetCapture();
+    if (capture) {
+        return capture == window;
+    }
+    if (windowManager->IsModal()) {
+        return false;
+    }
+
+    cIGZWin* mainWindow = windowManager->GetMainWindow();
+    return mainWindow && mainWindow->GetChildWindowFromCursorPoint(clientX, clientZ) == window;
+}
+
+bool ZoneViewInputControl::HorizontalWheelFilter_::QueryInterface(const uint32_t riid, void** ppvObj) {
+    if (riid == GZIID_cIGZUnknown) {
+        *ppvObj = static_cast<cIGZWinProcFilterW32*>(this);
+        return true;
+    }
+    *ppvObj = nullptr;
+    return false;
+}
+
+LRESULT ZoneViewInputControl::HorizontalWheelFilter_::FilterMessage(
+    const HWND hWnd, const UINT uMsg, const WPARAM wParam, const LPARAM lParam, bool& handled) {
+    if (uMsg != WM_MOUSEHWHEEL) {
+        return 0;
+    }
+
+    const int32_t wheelDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+    if (wheelDelta == 0 || !owner_.initialized || !owner_.IsOnTop()) {
+        return 0;
+    }
+
+    // WM_MOUSEHWHEEL has screen coordinates, the other mouse messages client ones.
+    POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+    if (ScreenToClient(hWnd, &point) && owner_.IsCursorOverView_(point.x, point.y)) {
+        handled = owner_.OnMouseWheelHorizontal_(wheelDelta);
+    }
+    return 0;
 }
 
 void ZoneViewInputControl::SetZoneType(const cISC4ZoneManager::ZoneType zoneType) {

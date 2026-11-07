@@ -1,8 +1,12 @@
 #pragma once
 
-#include "cSC4BaseViewInputControl.h"
+#include "cIGZCanvasW32.h"
+#include "cIGZWinProcFilterW32.h"
+#include "cRZAutoRefCount.h"
+#include "cSC4BaseViewInputControlEx.h"
 #include "zoning/ZoneToolState.hpp"
 
+#include <cstdint>
 #include <string>
 
 class cISC4City;
@@ -11,7 +15,7 @@ class cISC4ZoneDeveloper;
 class cISC4ZoneManager;
 template <typename T> class SC4CellRegion;
 
-class ZoneViewInputControl final : public cSC4BaseViewInputControl
+class ZoneViewInputControl final : public cSC4BaseViewInputControlEx
 {
 public:
     static constexpr uint32_t kZoneViewInputControlID = 0x57C44A10;
@@ -28,17 +32,25 @@ public:
     bool OnMouseDownL(int32_t x, int32_t z, uint32_t modifiers) override;
     bool OnMouseUpL(int32_t x, int32_t z, uint32_t modifiers) override;
     bool OnMouseMove(int32_t x, int32_t z, uint32_t modifiers) override;
-    bool OnMouseDownR(int32_t x, int32_t z, uint32_t modifiers) override;
     bool OnMouseWheel(int32_t x, int32_t z, uint32_t modifiers, int32_t wheelDelta) override;
     bool OnMouseExit() override;
     bool OnKeyDown(int32_t vkCode, uint32_t modifiers) override;
     bool OnKeyUp(int32_t vkCode, uint32_t modifiers) override;
 
+    bool OnMouseDownM(int32_t x, int32_t z, uint32_t modifiers) override;
+    bool OnMouseUpM(int32_t x, int32_t z, uint32_t modifiers) override;
+    bool OnMouseDownX(int32_t x, int32_t z, uint32_t modifiers, uint32_t button) override;
+    bool OnMouseUpX(int32_t x, int32_t z, uint32_t modifiers, uint32_t button) override;
+
     bool ShouldStack() override;
 
     void SetZoneType(cISC4ZoneManager::ZoneType zoneType);
+    // Pushed onto the view and not shut down since; it may be below a vanilla tool.
+    [[nodiscard]] bool IsActive() const { return active_; }
 
 private:
+    // Active and on top. Also marks the tool active again after a pause (see Deactivate).
+    bool IsLive_();
     enum class ValidationFailure_
     {
         None = 0,
@@ -46,6 +58,31 @@ private:
         TooLarge,
         TooSteep,
         InsufficientFunds,
+    };
+
+    enum class WheelTarget_ : uint8_t
+    {
+        None = 0,
+        Width,
+        Depth,
+        StreetInterval,
+        DiagonalThickness,
+    };
+
+    // Passes WM_MOUSEHWHEEL (tilt wheel) to the control; cSC4BaseViewInputControlEx only
+    // forwards the middle and X buttons. Owned by the control, so the reference count is fixed.
+    class HorizontalWheelFilter_ final : public cIGZWinProcFilterW32
+    {
+    public:
+        explicit HorizontalWheelFilter_(ZoneViewInputControl& owner) : owner_(owner) {}
+
+        bool QueryInterface(uint32_t riid, void** ppvObj) override;
+        uint32_t AddRef() override { return 1; }
+        uint32_t Release() override { return 1; }
+        LRESULT FilterMessage(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, bool& handled) override;
+
+    private:
+        ZoneViewInputControl& owner_;
     };
 
     bool TryGetServices_(cISC4City*& city, cISC4ZoneManager*& zoneManager, cISC4ZoneDeveloper*& zoneDeveloper) const;
@@ -75,6 +112,15 @@ private:
     void ClearPreview_();
     void CancelDrag_();
     void ApplyZoneDeveloperOptions_(cISC4ZoneDeveloper* zoneDeveloper) const;
+    // Shows a changed width, depth, interval or network: redraws the preview and cursor text.
+    void ApplyAdjustment_(const ZoneToolSnapshot& previousSnapshot);
+    void ApplyWheelStep_(WheelTarget_ target, int steps, const ZoneToolSnapshot& previousSnapshot);
+    bool IsControlButtonHeld_(ZoneMouseButton button) const;
+    bool OnControlButtonDown_(ZoneMouseButton button);
+    bool OnControlButtonUp_(ZoneMouseButton button);
+    bool IsCursorOverView_(int32_t clientX, int32_t clientZ) const;
+    bool OnMouseWheelHorizontal_(int32_t wheelDelta);
+    void ResetWheelState_() noexcept;
     cISC4NetworkTool* EnsureOverrideNetworkTool_(ZoneInternalNetworkMode mode);
     void ReleaseOverrideNetworkTool_();
 
@@ -93,4 +139,14 @@ private:
     bool diagonalMode_ = false;
     int diagonalThickness_ = 1;
     bool invalidSelectionOverlayActive_ = false;
+
+    int wheelAccumulator_ = 0;
+    WheelTarget_ wheelTarget_ = WheelTarget_::None;
+    // Bit per ZoneMouseButton turned with the wheel while held; its release is then no preset click.
+    uint8_t wheelUsedButtons_ = 0;
+    int horizontalWheelAccumulator_ = 0;
+    int horizontalWheelDirection_ = 0;
+    uint64_t horizontalWheelLastTick_ = 0;
+    HorizontalWheelFilter_ horizontalWheelFilter_{*this};
+    cRZAutoRefCount<cIGZCanvasW32> canvasW32_;
 };

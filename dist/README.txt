@@ -17,7 +17,9 @@ Installation instructions:
 Usage instructions:
 - While a zoning tool is active, a status panel shows the current parcel size, street interval and embedded network.
 - Tab/Shift+Tab cycles the embedded network: None -> Street -> Road -> OneWayRoad -> Avenue.
-- -/+ changes the parcel width, [/] the parcel height, and ,/. the street interval.
+- -/+ changes the parcel width, [/] the parcel depth, and ,/. the street interval.
+- By default the mouse wheel changes the parcel depth while you drag a zone, and tilting the wheel changes the width.
+- Mouse4/Mouse5 step through the zone's parcel size presets (Presets in the INI); hold Mouse5 and turn the wheel to zoom.
 - Where diagonal zoning is supported, D toggles it and the mouse wheel adjusts its width.
-- Per-zone defaults and logging are set in SC4ZoningExtensions.ini next to the DLL; it is created with defaults on first run.
+- Per-zone defaults, presets, mouse controls and logging are set in SC4ZoningExtensions.ini next to the DLL; it is created with defaults on first run.
 - If something looks off, check <My Documents>/SimCity 4/SC4ZoningExtensions.log.

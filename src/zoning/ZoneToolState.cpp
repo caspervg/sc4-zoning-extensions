@@ -13,6 +13,60 @@ namespace
         ZoneInternalNetworkMode::OneWayRoad,
         ZoneInternalNetworkMode::Avenue,
     }};
+
+    const char* GetMouseButtonLabel(const ZoneMouseButton button) noexcept
+    {
+        switch (button) {
+        case ZoneMouseButton::Middle:
+            return "Middle";
+        case ZoneMouseButton::XButton1:
+            return "Mouse4";
+        case ZoneMouseButton::XButton2:
+            return "Mouse5";
+        default:
+            return "None";
+        }
+    }
+
+    void AppendHint(std::string& line, const char* text)
+    {
+        if (!line.empty()) {
+            line.append(" | ");
+        }
+        line.append(text);
+    }
+
+    void AppendButtonHint(std::string& line, const ZoneMouseButton button, const char* joiner, const char* action)
+    {
+        if (button == ZoneMouseButton::None) {
+            return;
+        }
+        AppendHint(line, GetMouseButtonLabel(button));
+        line.append(joiner);
+        line.append(action);
+    }
+
+    // The mouse controls from [Controls], e.g. "Tilt wheel width | Wheel depth (while dragging) | Mouse4 prev preset".
+    std::string BuildControlsLine(const ZoneControlSettings& controls)
+    {
+        std::string line;
+        if (controls.horizontalWheel) {
+            AppendHint(line, "Tilt wheel width");
+        }
+        if (controls.verticalWheel == ZoneVerticalWheelMode::DepthWhileDragging) {
+            AppendHint(line, "Wheel depth (while dragging)");
+        }
+        else if (controls.verticalWheel == ZoneVerticalWheelMode::Depth) {
+            AppendHint(line, "Wheel depth");
+            AppendButtonHint(line, controls.zoomButton, "+Wheel ", "zoom");
+        }
+        AppendButtonHint(line, controls.presetPreviousButton, " ", "prev preset");
+        AppendButtonHint(line, controls.presetNextButton, " ", "next preset");
+        AppendButtonHint(line, controls.widthWheelButton, "+Wheel ", "width");
+        AppendButtonHint(line, controls.depthWheelButton, "+Wheel ", "depth");
+        AppendButtonHint(line, controls.streetIntervalWheelButton, "+Wheel ", "interval");
+        return line;
+    }
 }
 
 const ZoneToolSnapshot& ZoneToolState::Snapshot() const noexcept
@@ -20,14 +74,33 @@ const ZoneToolSnapshot& ZoneToolState::Snapshot() const noexcept
     return snapshot_;
 }
 
-void ZoneToolState::SetZoneDefaults(const ZoneTypeDefaultsTable& defaults) noexcept
+void ZoneToolState::SetZoneDefaults(const ZoneTypeDefaultsTable& defaults)
 {
     zoneDefaults_ = defaults;
     ApplyDefaultsForCurrentZoneType_();
 }
 
+void ZoneToolState::SetControls(const ZoneControlSettings& controls) noexcept
+{
+    snapshot_.controls = controls;
+}
+
+void ZoneToolState::RememberCurrentSize() noexcept
+{
+    if (const size_t index = static_cast<size_t>(snapshot_.zoneType); index < zoneDefaults_.size()) {
+        zoneDefaults_[index].parcelWidth = snapshot_.parcelWidth;
+        zoneDefaults_[index].parcelLength = snapshot_.parcelLength;
+    }
+}
+
+const ZoneTypeDefaultsTable& ZoneToolState::ZoneDefaults() const noexcept
+{
+    return zoneDefaults_;
+}
+
 void ZoneToolState::SetZoneType(const cISC4ZoneManager::ZoneType zoneType) noexcept
 {
+    RememberCurrentSize();
     snapshot_.zoneType = zoneType;
     ApplyDefaultsForCurrentZoneType_();
 }
@@ -71,16 +144,45 @@ void ZoneToolState::CycleNetworkMode(const int delta) noexcept
 void ZoneToolState::AdjustParcelWidth(const int delta) noexcept
 {
     snapshot_.parcelWidth = ClampParcelMetric_(snapshot_.parcelWidth + delta);
+    SyncPresetIndex_();
 }
 
 void ZoneToolState::AdjustParcelLength(const int delta) noexcept
 {
     snapshot_.parcelLength = ClampParcelMetric_(snapshot_.parcelLength + delta);
+    SyncPresetIndex_();
 }
 
 void ZoneToolState::AdjustStreetInterval(const int delta) noexcept
 {
     snapshot_.streetInterval = ClampStreetInterval_(snapshot_.streetInterval + delta);
+}
+
+bool ZoneToolState::CyclePreset(const int delta) noexcept
+{
+    const size_t index = static_cast<size_t>(snapshot_.zoneType);
+    if (index >= zoneDefaults_.size() || delta == 0) {
+        return false;
+    }
+
+    const std::vector<ZoneParcelPreset>& presets = zoneDefaults_[index].presets;
+    if (presets.empty()) {
+        return false;
+    }
+
+    const int count = static_cast<int>(presets.size());
+    int next = 0;
+    if (snapshot_.presetIndex < 0) {
+        next = delta > 0 ? 0 : count - 1;
+    }
+    else {
+        next = (snapshot_.presetIndex + (delta > 0 ? 1 : -1) + count) % count;
+    }
+
+    snapshot_.parcelWidth = ClampParcelMetric_(presets[static_cast<size_t>(next)].width);
+    snapshot_.parcelLength = ClampParcelMetric_(presets[static_cast<size_t>(next)].depth);
+    snapshot_.presetIndex = next;
+    return true;
 }
 
 int ZoneToolState::ClampParcelMetric_(const int value) noexcept
@@ -105,6 +207,34 @@ void ZoneToolState::ApplyDefaultsForCurrentZoneType_() noexcept
     snapshot_.parcelLength = ClampParcelMetric_(defaults.parcelLength);
     snapshot_.streetInterval = ClampStreetInterval_(defaults.streetInterval);
     snapshot_.networkMode = defaults.networkMode;
+    snapshot_.presetIndex = -1;
+    SyncPresetIndex_();
+}
+
+void ZoneToolState::SyncPresetIndex_() noexcept
+{
+    const size_t index = static_cast<size_t>(snapshot_.zoneType);
+    if (index >= zoneDefaults_.size()) {
+        snapshot_.presetCount = 0;
+        snapshot_.presetIndex = -1;
+        return;
+    }
+
+    const std::vector<ZoneParcelPreset>& presets = zoneDefaults_[index].presets;
+    snapshot_.presetCount = static_cast<int>(presets.size());
+
+    // Keep the current preset while it still matches, so duplicates in the list cycle normally.
+    const auto matches = [this](const ZoneParcelPreset& preset) {
+        return preset.width == snapshot_.parcelWidth && preset.depth == snapshot_.parcelLength;
+    };
+    if (snapshot_.presetIndex >= 0 &&
+        snapshot_.presetIndex < snapshot_.presetCount &&
+        matches(presets[static_cast<size_t>(snapshot_.presetIndex)])) {
+        return;
+    }
+
+    const auto it = std::find_if(presets.begin(), presets.end(), matches);
+    snapshot_.presetIndex = it != presets.end() ? static_cast<int>(it - presets.begin()) : -1;
 }
 
 const char* GetZoneTypeLabel(const cISC4ZoneManager::ZoneType zoneType) noexcept
@@ -188,7 +318,7 @@ ZoneToolTipText BuildZoneToolTipText(const ZoneToolSnapshot& snapshot)
     std::snprintf(
         bodyBuffer,
         sizeof(bodyBuffer),
-        "%s | %dx%d | I:%s\nTab/Shift+Tab network | -/+ width | [/] height | ,/. interval",
+        "%s | W%d x D%d | I:%s\nTab/Shift+Tab network | -/+ width | [/] depth | ,/. interval",
         GetZoneNetworkModeShortLabel(snapshot.networkMode),
         snapshot.parcelWidth,
         snapshot.parcelLength,
@@ -197,6 +327,11 @@ ZoneToolTipText BuildZoneToolTipText(const ZoneToolSnapshot& snapshot)
     ZoneToolTipText text;
     text.title = GetZoneTypeShortLabel(snapshot.zoneType);
     text.body = bodyBuffer;
+    const std::string controlsLine = BuildControlsLine(snapshot.controls);
+    if (!controlsLine.empty()) {
+        text.body.append("\n");
+        text.body.append(controlsLine);
+    }
     return text;
 }
 
@@ -207,7 +342,14 @@ ZoneToolStatusText BuildZoneToolStatusText(const ZoneToolSnapshot& snapshot)
     char intervalBuffer[48] = {};
 
     std::snprintf(zoneBuffer, sizeof(zoneBuffer), "Zone: %s", GetZoneTypeLabel(snapshot.zoneType));
-    std::snprintf(parcelBuffer, sizeof(parcelBuffer), "Parcel: %d x %d", snapshot.parcelWidth, snapshot.parcelLength);
+    if (snapshot.presetIndex < 0) {
+        std::snprintf(parcelBuffer, sizeof(parcelBuffer), "Parcel: %d wide x %d deep", snapshot.parcelWidth,
+                      snapshot.parcelLength);
+    }
+    else {
+        std::snprintf(parcelBuffer, sizeof(parcelBuffer), "Parcel: %d wide x %d deep (preset %d/%d)",
+                      snapshot.parcelWidth, snapshot.parcelLength, snapshot.presetIndex + 1, snapshot.presetCount);
+    }
     if (snapshot.streetInterval == 0) {
         std::snprintf(intervalBuffer, sizeof(intervalBuffer), "Street interval: Auto");
     }
@@ -219,7 +361,8 @@ ZoneToolStatusText BuildZoneToolStatusText(const ZoneToolSnapshot& snapshot)
     text.zoneLine = zoneBuffer;
     text.parcelLine = parcelBuffer;
     text.streetIntervalLine = intervalBuffer;
-    text.modifiersLine = "Tab/Shift+Tab network | -/+ width | [/] height | ,/. interval";
+    text.modifiersLine = "Tab/Shift+Tab network | -/+ width | [/] depth | ,/. interval";
+    text.controlsLine = BuildControlsLine(snapshot.controls);
     if (!snapshot.diagonalSupported) {
         text.wheelLine.clear();
     }

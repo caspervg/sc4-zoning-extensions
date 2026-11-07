@@ -24,6 +24,24 @@ namespace
     constexpr uint32_t kGZWin_SC4View3DWin = 0x9A47B417;
     constexpr uint32_t kZoneStatusPanelId = 0x57C44A14;
     constexpr int32_t kZoneStatusPanelOrder = 101;
+
+    // Vanilla tool commands push their control on top of the current one instead of replacing it,
+    // so our zoning control can still be on the stack below the top. Pops whatever is above it;
+    // returns whether it is now on top.
+    bool RaiseToTop(cISC4View3DWin* const view3D, ZoneViewInputControl* const control)
+    {
+        if (!view3D || !control) {
+            return false;
+        }
+        if (control->IsActive()) {
+            while (cISC4ViewInputControl* const top = view3D->GetCurrentViewInputControl()) {
+                if (top == control || !view3D->RemoveCurrentViewInputControl(false)) {
+                    break;
+                }
+            }
+        }
+        return view3D->GetCurrentViewInputControl() == control;
+    }
 }
 
 SC4ZoningExtensionsDirector::~SC4ZoningExtensionsDirector() = default;
@@ -94,6 +112,7 @@ bool SC4ZoningExtensionsDirector::PostAppInit()
         settings_.GetLogToFile());
 
     toolState_.SetZoneDefaults(settings_.GetZoneDefaults());
+    toolState_.SetControls(settings_.GetControls());
 
     cIGZMessageServer2Ptr messageServer;
     if (messageServer) {
@@ -173,7 +192,7 @@ bool SC4ZoningExtensionsDirector::HandleInvokeZoningTool_(cISC4View3DWin* view3D
         zoneType == cISC4ZoneManager::ZoneType::Landfill) {
         toolState_.SetToolActive(false);
 
-        if (zoneControl_ && view3D->GetCurrentViewInputControl() == zoneControl_) {
+        if (RaiseToTop(view3D, zoneControl_)) {
             view3D->RemoveCurrentViewInputControl(false);
         }
 
@@ -184,7 +203,7 @@ bool SC4ZoningExtensionsDirector::HandleInvokeZoningTool_(cISC4View3DWin* view3D
         return false;
     }
 
-    if (view3D->GetCurrentViewInputControl() == zoneControl_) {
+    if (RaiseToTop(view3D, zoneControl_)) {
         zoneControl_->SetWindow(view3D->AsIGZWin());
         zoneControl_->SetZoneType(zoneType);
         return true;
@@ -227,10 +246,12 @@ void SC4ZoningExtensionsDirector::PostCityInit_()
 
 void SC4ZoningExtensionsDirector::PreCityShutdown_()
 {
+    toolState_.RememberCurrentSize();
+    settings_.SaveParcelSizes(toolState_.ZoneDefaults());
     toolState_.SetToolActive(false);
     UnregisterStatusPanel_();
 
-    if (view3D_ && zoneControl_ && view3D_->GetCurrentViewInputControl() == zoneControl_) {
+    if (RaiseToTop(view3D_, zoneControl_)) {
         view3D_->RemoveCurrentViewInputControl(false);
     }
 
