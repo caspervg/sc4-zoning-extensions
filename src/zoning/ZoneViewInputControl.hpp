@@ -145,8 +145,6 @@ private:
     // Bit per ZoneMouseButton turned with the wheel while held; its release is then no preset click.
     uint8_t wheelUsedButtons_ = 0;
     int horizontalWheelAccumulator_ = 0;
-    int horizontalWheelDirection_ = 0;
-    uint64_t horizontalWheelLastTick_ = 0;
     HorizontalWheelFilter_ horizontalWheelFilter_{*this};
     cRZAutoRefCount<cIGZCanvasW32> canvasW32_;
 };

@@ -48,7 +48,6 @@ namespace {
     constexpr int kMinDiagonalThickness = 1;
     constexpr int kMaxDiagonalThickness = 24;
     // Tilt messages closer together than this, in the same direction, are one tilt.
-    constexpr uint64_t kHorizontalWheelBurstMs = 120;
     constexpr size_t kZoneConstraintTableSize = 16;
     constexpr size_t kZoneMaxSlopeOffset = 0x198;
     constexpr size_t kZoneCostOffset = 0x1E0;
@@ -610,31 +609,23 @@ bool ZoneViewInputControl::OnMouseWheelHorizontal_(const int32_t wheelDelta) {
     LOG_DEBUG("Horizontal wheel: delta={}, active={}", wheelDelta, active_);
 
     const ZoneToolSnapshot snapshot = toolState_.Snapshot();
-    const int unitsPerStep = snapshot.controls.horizontalWheelUnitsPerStep;
+    const int unitsPerStep = snapshot.controls.horizontalWheelUnitsPerStep > 0
+                                 ? snapshot.controls.horizontalWheelUnitsPerStep
+                                 : WHEEL_DELTA;
     if (wheelDelta == 0 || !snapshot.controls.horizontalWheel || !IsLive_()) {
         return false;
     }
 
     modifiers_ = NormalizeModifiers(0);
 
-    // A tilt arrives as a burst of messages for as long as the wheel is held. The burst's first
-    // message steps once; later ones only step when HorizontalWheelUnitsPerStep is set.
-    const uint64_t now = GetTickCount64();
-    const int direction = wheelDelta > 0 ? 1 : -1;
-    int steps = 0;
-    if (now - horizontalWheelLastTick_ <= kHorizontalWheelBurstMs && direction == horizontalWheelDirection_) {
-        if (unitsPerStep > 0) {
-            horizontalWheelAccumulator_ += std::abs(wheelDelta);
-            steps = horizontalWheelAccumulator_ / unitsPerStep * direction;
-            horizontalWheelAccumulator_ %= unitsPerStep;
-        }
-    }
-    else {
+    // Add up the deltas and step once per unitsPerStep (by default WHEEL_DELTA: one notch, or one
+    // repeat while the wheel is held tilted). A change of direction drops the remainder.
+    if ((wheelDelta > 0) != (horizontalWheelAccumulator_ > 0)) {
         horizontalWheelAccumulator_ = 0;
-        horizontalWheelDirection_ = direction;
-        steps = direction;
     }
-    horizontalWheelLastTick_ = now;
+    horizontalWheelAccumulator_ += wheelDelta;
+    const int steps = horizontalWheelAccumulator_ / unitsPerStep;
+    horizontalWheelAccumulator_ %= unitsPerStep;
 
     if (steps != 0) {
         ApplyWheelStep_(WheelTarget_::Width, steps, snapshot);
@@ -891,7 +882,6 @@ void ZoneViewInputControl::ResetWheelState_() noexcept {
     wheelTarget_ = WheelTarget_::None;
     wheelUsedButtons_ = 0;
     horizontalWheelAccumulator_ = 0;
-    horizontalWheelDirection_ = 0;
 }
 
 // ponytail: copy of cSC4BaseViewInputControlEx::IsOverView (private there); move the tilt wheel
@@ -938,7 +928,8 @@ LRESULT ZoneViewInputControl::HorizontalWheelFilter_::FilterMessage(
     if (ScreenToClient(hWnd, &point) && owner_.IsCursorOverView_(point.x, point.y)) {
         handled = owner_.OnMouseWheelHorizontal_(wheelDelta);
     }
-    return 0;
+    // Tilt-wheel drivers expect TRUE for a handled WM_MOUSEHWHEEL (unlike WM_MOUSEWHEEL).
+    return handled ? TRUE : 0;
 }
 
 void ZoneViewInputControl::SetZoneType(const cISC4ZoneManager::ZoneType zoneType) {
