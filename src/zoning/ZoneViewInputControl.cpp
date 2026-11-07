@@ -418,8 +418,8 @@ bool ZoneViewInputControl::Init() {
 }
 
 bool ZoneViewInputControl::Shutdown() {
+    active_ = false;  // first, so CancelDrag_ does not put the cursor text back
     CancelDrag_();
-    active_ = false;
     toolState_.SetToolActive(false);
     ReleaseOverrideNetworkTool_();
     if (canvasW32_) {
