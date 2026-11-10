@@ -254,3 +254,13 @@ jobs:
             dist-package/SC4ZoningExtensions.spdx.json
             dist-package/SHA256SUMS.txt
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          # The action publishes prereleases before uploading assets, which immutable releases reject.
+          # Keep them as drafts and publish below once the assets are in.
+          draft: ${{ contains(github.ref_name, '-') }}
+
+      - name: Publish prerelease
+        if: contains(github.ref_name, '-')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${{ github.ref_name }}" --repo "${{ github.repository }}" --draft=false
