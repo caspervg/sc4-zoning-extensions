@@ -841,6 +841,9 @@ void ZoneDeveloperHooks::ResetFreshNetworkTool(cISC4NetworkTool* tool) {
 
 void ZoneDeveloperHooks::DestroyFreshNetworkTool(cISC4NetworkTool*& tool) {
     if (tool) {
+        // Init registers the tool with the message server, which holds a reference until
+        // Shutdown. Without it the tool outlives the city and crashes on exit (spRenderer gone).
+        tool->Shutdown();
         tool->Release();
         tool = nullptr;
     }
